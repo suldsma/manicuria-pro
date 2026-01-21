@@ -1,3 +1,4 @@
+// backend/models/Servicio.js
 import mongoose from 'mongoose';
 
 const servicioSchema = new mongoose.Schema({
@@ -6,8 +7,12 @@ const servicioSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  descripcion: {
+    type: String,
+    default: ''
+  },
   duracion: {
-    type: Number,
+    type: Number, // en minutos
     required: true,
     min: 15
   },
@@ -16,14 +21,16 @@ const servicioSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
-  observaciones: {
-    type: String,
-    default: ''
-  },
   activo: {
     type: Boolean,
     default: true
+  },
+  imagen: {
+    type: String,
+    default: ''
   }
-}, { timestamps: true });
+}, {
+  timestamps: true
+});
 
 export default mongoose.model('Servicio', servicioSchema);
