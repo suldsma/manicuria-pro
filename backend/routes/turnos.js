@@ -1,12 +1,11 @@
-// backend/routes/turnos.js
+// backend/routes/turnos.js - Version MySQL
 import express from 'express';
-import Turno from '../models/Turno.js';
-import Servicio from '../models/Servicio.js';
+import pool from '../config/db.js';
 import verificarToken from '../middleware/auth.js';
 
 const router = express.Router();
 
-// GET /api/turnos/disponibles?fecha=2026-02-10&servicioId=xxx
+// GET /api/turnos/disponibles
 router.get('/disponibles', async (req, res) => {
   try {
     const { fecha, servicioId } = req.query;
@@ -15,25 +14,27 @@ router.get('/disponibles', async (req, res) => {
       return res.status(400).json({ mensaje: 'Fecha y servicioId requeridos' });
     }
 
-    // Obtener servicio para saber la duración
-    const servicio = await Servicio.findById(servicioId);
-    if (!servicio) {
+    const [servicios] = await pool.execute(
+      'SELECT duracion FROM servicios WHERE id = ?',
+      [servicioId]
+    );
+
+    if (servicios.length === 0) {
       return res.status(404).json({ mensaje: 'Servicio no encontrado' });
     }
 
-    // Buscar turnos ocupados en esa fecha
-    const fechaInicio = new Date(fecha);
-    fechaInicio.setHours(0, 0, 0, 0);
-    
-    const fechaFin = new Date(fecha);
-    fechaFin.setHours(23, 59, 59, 999);
+    const duracionServicio = servicios[0].duracion;
 
-    const turnosOcupados = await Turno.find({
-      fecha: { $gte: fechaInicio, $lte: fechaFin },
-      estado: { $in: ['pagado', 'confirmado'] }
-    }).populate('servicio');
+    const [turnosOcupados] = await pool.execute(
+      `SELECT t.hora, s.duracion 
+       FROM turnos t
+       INNER JOIN servicios s ON t.servicio_id = s.id
+       WHERE t.fecha = ? 
+       AND t.estado IN ('pagado', 'confirmado')
+       ORDER BY t.hora`,
+      [fecha]
+    );
 
-    // Generar horarios disponibles (9:00 a 18:00)
     const horariosDisponibles = [];
     const horaInicio = 9;
     const horaFin = 18;
@@ -41,14 +42,13 @@ router.get('/disponibles', async (req, res) => {
     for (let hora = horaInicio; hora < horaFin; hora++) {
       for (let minuto = 0; minuto < 60; minuto += 30) {
         const horario = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}`;
-        
-        // Verificar si está ocupado
+        const minutosHorario = hora * 60 + minuto;
+
         const estaOcupado = turnosOcupados.some(turno => {
-          const horasTurno = turno.hora.split(':').map(Number);
-          const minutosTurno = horasTurno[0] * 60 + horasTurno[1];
-          const minutosHorario = hora * 60 + minuto;
-          const duracionTurno = turno.servicio.duracion;
-          
+          const [h, m] = turno.hora.split(':').map(Number);
+          const minutosTurno = h * 60 + m;
+          const duracionTurno = turno.duracion;
+
           return minutosHorario >= minutosTurno && 
                  minutosHorario < (minutosTurno + duracionTurno);
         });
@@ -67,30 +67,57 @@ router.get('/disponibles', async (req, res) => {
   }
 });
 
-// POST /api/turnos (crear turno pendiente)
+// POST /api/turnos
 router.post('/', async (req, res) => {
   try {
     const { cliente, servicioId, fecha, hora } = req.body;
 
-    // Validar que el servicio exista
-    const servicio = await Servicio.findById(servicioId);
-    if (!servicio) {
+    const [servicios] = await pool.execute(
+      'SELECT * FROM servicios WHERE id = ?',
+      [servicioId]
+    );
+
+    if (servicios.length === 0) {
       return res.status(404).json({ mensaje: 'Servicio no encontrado' });
     }
 
-    // Crear turno pendiente (se confirmará después del pago)
-    const nuevoTurno = new Turno({
-      cliente,
-      servicio: servicioId,
-      fecha: new Date(fecha),
-      hora,
-      estado: 'pendiente'
-    });
+    const [result] = await pool.execute(
+      `INSERT INTO turnos (cliente_nombre, cliente_telefono, cliente_email, servicio_id, fecha, hora, estado) 
+       VALUES (?, ?, ?, ?, ?, ?, 'pendiente')`,
+      [cliente.nombre, cliente.telefono, cliente.email || null, servicioId, fecha, hora]
+    );
 
-    await nuevoTurno.save();
-    await nuevoTurno.populate('servicio');
+    const [turnoCreado] = await pool.execute(
+      `SELECT 
+        t.*,
+        s.nombre AS servicio_nombre,
+        s.precio AS servicio_precio,
+        s.duracion AS servicio_duracion
+       FROM turnos t
+       INNER JOIN servicios s ON t.servicio_id = s.id
+       WHERE t.id = ?`,
+      [result.insertId]
+    );
 
-    res.status(201).json(nuevoTurno);
+    const turno = {
+      _id: turnoCreado[0].id,
+      cliente: {
+        nombre: turnoCreado[0].cliente_nombre,
+        telefono: turnoCreado[0].cliente_telefono,
+        email: turnoCreado[0].cliente_email
+      },
+      servicio: {
+        _id: turnoCreado[0].servicio_id,
+        nombre: turnoCreado[0].servicio_nombre,
+        precio: turnoCreado[0].servicio_precio,
+        duracion: turnoCreado[0].servicio_duracion
+      },
+      fecha: turnoCreado[0].fecha,
+      hora: turnoCreado[0].hora,
+      estado: turnoCreado[0].estado
+    };
+
+    res.status(201).json(turno);
 
   } catch (error) {
     console.error('Error creando turno:', error);
@@ -98,30 +125,34 @@ router.post('/', async (req, res) => {
   }
 });
 
-// GET /api/turnos (solo admin - ver todos)
+// GET /api/turnos
 router.get('/', verificarToken, async (req, res) => {
   try {
     const { fecha, estado } = req.query;
-    const filtro = {};
+    let query = `
+      SELECT 
+        t.*,
+        s.nombre AS servicio_nombre,
+        s.precio AS servicio_precio
+      FROM turnos t
+      INNER JOIN servicios s ON t.servicio_id = s.id
+      WHERE 1=1
+    `;
+    const params = [];
 
     if (fecha) {
-      const fechaInicio = new Date(fecha);
-      fechaInicio.setHours(0, 0, 0, 0);
-      
-      const fechaFin = new Date(fecha);
-      fechaFin.setHours(23, 59, 59, 999);
-
-      filtro.fecha = { $gte: fechaInicio, $lte: fechaFin };
+      query += ' AND t.fecha = ?';
+      params.push(fecha);
     }
 
     if (estado) {
-      filtro.estado = estado;
+      query += ' AND t.estado = ?';
+      params.push(estado);
     }
 
-    const turnos = await Turno.find(filtro)
-      .populate('servicio')
-      .sort({ fecha: 1, hora: 1 });
+    query += ' ORDER BY t.fecha, t.hora';
 
+    const [turnos] = await pool.execute(query, params);
     res.json(turnos);
 
   } catch (error) {
@@ -130,20 +161,45 @@ router.get('/', verificarToken, async (req, res) => {
   }
 });
 
-// PUT /api/turnos/:id (actualizar estado - admin)
+// PUT /api/turnos/:id
 router.put('/:id', verificarToken, async (req, res) => {
   try {
-    const turno = await Turno.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true }
-    ).populate('servicio');
+    const updates = [];
+    const params = [];
 
-    if (!turno) {
+    if (req.body.estado) {
+      updates.push('estado = ?');
+      params.push(req.body.estado);
+    }
+    if (req.body.notas !== undefined) {
+      updates.push('notas = ?');
+      params.push(req.body.notas);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ mensaje: 'No hay datos para actualizar' });
+    }
+
+    params.push(req.params.id);
+
+    await pool.execute(
+      `UPDATE turnos SET ${updates.join(', ')} WHERE id = ?`,
+      params
+    );
+
+    const [turnoActualizado] = await pool.execute(
+      `SELECT t.*, s.nombre AS servicio_nombre 
+       FROM turnos t
+       INNER JOIN servicios s ON t.servicio_id = s.id
+       WHERE t.id = ?`,
+      [req.params.id]
+    );
+
+    if (turnoActualizado.length === 0) {
       return res.status(404).json({ mensaje: 'Turno no encontrado' });
     }
 
-    res.json(turno);
+    res.json(turnoActualizado[0]);
 
   } catch (error) {
     console.error('Error actualizando turno:', error);
@@ -151,20 +207,24 @@ router.put('/:id', verificarToken, async (req, res) => {
   }
 });
 
-// DELETE /api/turnos/:id (cancelar turno - admin)
+// DELETE /api/turnos/:id
 router.delete('/:id', verificarToken, async (req, res) => {
   try {
-    const turno = await Turno.findByIdAndUpdate(
-      req.params.id,
-      { estado: 'cancelado' },
-      { new: true }
+    await pool.execute(
+      `UPDATE turnos SET estado = 'cancelado' WHERE id = ?`,
+      [req.params.id]
     );
 
-    if (!turno) {
+    const [turno] = await pool.execute(
+      'SELECT * FROM turnos WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (turno.length === 0) {
       return res.status(404).json({ mensaje: 'Turno no encontrado' });
     }
 
-    res.json({ mensaje: 'Turno cancelado exitosamente', turno });
+    res.json({ mensaje: 'Turno cancelado exitosamente', turno: turno[0] });
 
   } catch (error) {
     console.error('Error cancelando turno:', error);

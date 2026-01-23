@@ -1,387 +1,169 @@
-import React, { useState, useEffect } from 'react';
-import { Calendar, Clock, CheckCircle, DollarSign, User, Menu, X, LogOut } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { db } from './backend/config/db'; // Verifica que la ruta sea correcta
+import { ref, set, onValue, remove } from "firebase/database";
+import { 
+  Calendar, Clock, CheckCircle, ArrowLeft, 
+  Trash2, LayoutDashboard, UserPlus, Lock 
+} from 'lucide-react';
 
-const API_URL = 'http://localhost:5000/api';
+const App = () => {
+  // --- ESTADOS ---
+  const [modoAdmin, setModoAdmin] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [autenticado, setAutenticado] = useState(false);
+  const [paso, setPaso] = useState(1);
+  const [servicioSeleccionado, setServicioSeleccionado] = useState(null);
+  const [fechaSeleccionada, setFechaSeleccionada] = useState('');
+  const [horaSeleccionada, setHoraSeleccionada] = useState('');
+  const [datosCliente, setDatosCliente] = useState({ nombre: '', email: '', telefono: '' });
+  const [turnosReservados, setTurnosReservados] = useState({});
 
-// Componente Principal
-export default function ManicuriaApp() {
-  const [vista, setVista] = useState('cliente');
-  const [servicios, setServicios] = useState([]);
+  const servicios = [
+    { id: 1, nombre: 'Manicura Clásica', precio: 3500 },
+    { id: 2, nombre: 'Esmaltado Semipermanente', precio: 5500 },
+    { id: 3, nombre: 'Kapping con Esculpidas', precio: 8000 }
+  ];
 
+  const horariosBase = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
+
+  // --- CONEXIÓN REAL CON TU FIREBASE ---
   useEffect(() => {
-    cargarServicios();
+    const turnosRef = ref(db, 'turnos');
+    return onValue(turnosRef, (snapshot) => {
+      setTurnosReservados(snapshot.val() || {});
+    });
   }, []);
 
-  const cargarServicios = async () => {
+  const manejarReserva = async (e) => {
+    e.preventDefault();
+    const idUnico = `${fechaSeleccionada}_${horaSeleccionada.replace(':', '')}`;
     try {
-      const res = await fetch(`${API_URL}/servicios`);
-      const data = await res.json();
-      setServicios(data);
-    } catch (error) {
-      console.error('Error cargando servicios:', error);
+      await set(ref(db, `turnos/${idUnico}`), {
+        ...datosCliente,
+        servicio: servicioSeleccionado.nombre,
+        precio: servicioSeleccionado.precio,
+        fecha: fechaSeleccionada,
+        hora: horaSeleccionada
+      });
+      setPaso(4);
+    } catch (err) { alert("Error al conectar con Firebase"); }
+  };
+
+  const eliminarTurno = (id) => {
+    if(window.confirm("¿Eliminar este turno?")) remove(ref(db, `turnos/${id}`));
+  };
+
+  // --- LÓGICA DE INTERFAZ ---
+  const fechasDisponibles = useMemo(() => {
+    const lista = [];
+    for (let i = 0; i < 15; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() + i);
+      if (d.getDay() !== 0) lista.push(d.toISOString().split('T')[0]);
     }
+    return lista;
+  }, []);
+
+  const loginAdmin = () => {
+    if (passwordInput === 'susana2026') setAutenticado(true); // Cambia tu contraseña aquí
+    else alert("Contraseña incorrecta");
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-pink-50 to-purple-50">
-      <header className="bg-white shadow-sm border-b-4 border-pink-400">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-pink-500 to-purple-500 rounded-lg flex items-center justify-center">
-                <span className="text-white text-xl">💅</span>
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold text-gray-800">Manicuría PRO</h1>
-                <p className="text-sm text-gray-500">Tu belleza, nuestra pasión</p>
-              </div>
-            </div>
-            <button
-              onClick={() => setVista(vista === 'cliente' ? 'admin' : 'cliente')}
-              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
-            >
-              {vista === 'cliente' ? '🔐 Admin' : '👥 Cliente'}
-            </button>
-          </div>
+    <div className={`min-h-screen p-4 ${modoAdmin ? 'bg-slate-900 text-white' : 'bg-pink-50'}`}>
+      <div className="max-w-md mx-auto">
+        
+        {/* Botón de Acceso Admin */}
+        <div className="text-right mb-4">
+          <button onClick={() => setModoAdmin(!modoAdmin)} className="text-[10px] opacity-40 uppercase tracking-widest">
+            {modoAdmin ? 'Volver' : 'Acceso Staff'}
+          </button>
         </div>
-      </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-8">
-        {vista === 'cliente' ? (
-          <VistaCliente servicios={servicios} />
-        ) : (
-          <VistaAdmin servicios={servicios} onActualizar={cargarServicios} />
-        )}
-      </main>
-    </div>
-  );
-}
-
-function VistaCliente({ servicios }) {
-  const [paso, setPaso] = useState(1);
-  const [reserva, setReserva] = useState({
-    servicioId: null,
-    fecha: '',
-    hora: '',
-    cliente: { nombre: '', telefono: '', email: '' }
-  });
-  const [horariosDisponibles, setHorariosDisponibles] = useState([]);
-  const [loading, setLoading] = useState(false);
-
-  const servicioSeleccionado = servicios.find(s => s._id === reserva.servicioId);
-
-  const buscarHorarios = async () => {
-    if (!reserva.servicioId || !reserva.fecha) return;
-    
-    setLoading(true);
-    try {
-      const res = await fetch(
-        `${API_URL}/turnos/disponibles?fecha=${reserva.fecha}&servicioId=${reserva.servicioId}`
-      );
-      const data = await res.json();
-      setHorariosDisponibles(data.horarios);
-    } catch (error) {
-      console.error('Error buscando horarios:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (reserva.fecha && reserva.servicioId) {
-      buscarHorarios();
-    }
-  }, [reserva.fecha, reserva.servicioId]);
-
-  const confirmarReserva = async () => {
-    setLoading(true);
-    try {
-      const resTurno = await fetch(`${API_URL}/turnos`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(reserva)
-      });
-      const turno = await resTurno.json();
-
-      const resPago = await fetch(`${API_URL}/pagos/crear-preferencia`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ turnoId: turno._id })
-      });
-      const { init_point } = await resPago.json();
-
-      window.location.href = init_point;
-    } catch (error) {
-      console.error('Error confirmando reserva:', error);
-      alert('Error al procesar la reserva');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="max-w-4xl mx-auto">
-      <div className="flex items-center justify-center mb-8 gap-4">
-        {[1, 2, 3, 4].map(num => (
-          <div key={num} className="flex items-center">
-            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${
-              paso >= num ? 'bg-pink-500 text-white' : 'bg-gray-200 text-gray-400'
-            }`}>
-              {num}
-            </div>
-            {num < 4 && <div className={`w-16 h-1 ${paso > num ? 'bg-pink-500' : 'bg-gray-200'}`} />}
-          </div>
-        ))}
-      </div>
-
-      {paso === 1 && (
-        <div>
-          <h2 className="text-2xl font-bold mb-6 text-center">Elegí tu servicio</h2>
-          <div className="grid md:grid-cols-2 gap-6">
-            {servicios.map(servicio => (
-              <div
-                key={servicio._id}
-                onClick={() => {
-                  setReserva({ ...reserva, servicioId: servicio._id });
-                  setPaso(2);
-                }}
-                className="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition cursor-pointer border-2 border-transparent hover:border-pink-400"
-              >
-                <h3 className="text-xl font-bold text-gray-800 mb-2">{servicio.nombre}</h3>
-                <p className="text-gray-600 mb-4">{servicio.descripcion}</p>
-                <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-2 text-gray-500">
-                    <Clock size={18} />
-                    <span>{servicio.duracion} min</span>
-                  </div>
-                  <div className="text-2xl font-bold text-pink-600">
-                    ${servicio.precio.toLocaleString()}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {paso === 2 && (
-        <div className="bg-white p-8 rounded-xl shadow-lg">
-          <h2 className="text-2xl font-bold mb-6">Elegí fecha y hora</h2>
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium mb-2">Fecha</label>
-              <input
-                type="date"
-                min={new Date().toISOString().split('T')[0]}
-                value={reserva.fecha}
-                onChange={(e) => setReserva({ ...reserva, fecha: e.target.value })}
-                className="w-full p-3 border rounded-lg"
+        {modoAdmin ? (
+          /* --- PANEL ADMINISTRATIVO --- */
+          !autenticado ? (
+            <div className="bg-slate-800 p-8 rounded-3xl text-center space-y-4">
+              <Lock className="mx-auto text-pink-500" />
+              <h2 className="font-bold">Panel Protegido</h2>
+              <input 
+                type="password" 
+                placeholder="Palabra secreta"
+                className="w-full p-3 rounded-xl bg-slate-700 border-none outline-none"
+                onChange={(e) => setPasswordInput(e.target.value)}
               />
+              <button onClick={loginAdmin} className="w-full bg-pink-600 p-3 rounded-xl font-bold">Entrar</button>
             </div>
-            
-            {loading ? (
-              <p className="text-center text-gray-500">Buscando horarios...</p>
-            ) : horariosDisponibles.length > 0 ? (
-              <div>
-                <label className="block text-sm font-medium mb-2">Horarios disponibles</label>
-                <div className="grid grid-cols-4 gap-3">
-                  {horariosDisponibles.map(hora => (
-                    <button
-                      key={hora}
-                      onClick={() => {
-                        setReserva({ ...reserva, hora });
-                        setPaso(3);
-                      }}
-                      className="p-3 border-2 rounded-lg hover:border-pink-500 hover:bg-pink-50 transition"
-                    >
-                      {hora}
+          ) : (
+            <div className="space-y-4">
+              <h1 className="text-2xl font-black text-pink-400">MIS TURNOS</h1>
+              {Object.entries(turnosReservados).map(([id, t]) => (
+                <div key={id} className="bg-slate-800 p-4 rounded-2xl border border-slate-700 flex justify-between items-center">
+                  <div>
+                    <p className="font-bold">{t.nombre}</p>
+                    <p className="text-xs text-pink-400">{t.fecha} - {t.hora}hs</p>
+                    <p className="text-[10px] opacity-60">{t.servicio}</p>
+                  </div>
+                  <button onClick={() => eliminarTurno(id)} className="text-slate-500 hover:text-red-500"><Trash2 size={18}/></button>
+                </div>
+              ))}
+            </div>
+          )
+        ) : (
+          /* --- VISTA CLIENTE --- */
+          <div className="bg-white rounded-[2.5rem] shadow-xl overflow-hidden">
+            <div className="bg-pink-500 p-8 text-white text-center">
+              <h1 className="text-3xl font-black italic">Nails Studio</h1>
+              <p className="text-pink-100 text-sm">Reserva tu lugar ahora</p>
+            </div>
+
+            <div className="p-6">
+              {paso === 1 && (
+                <div className="space-y-4">
+                  {servicios.map(s => (
+                    <button key={s.id} onClick={() => { setServicioSeleccionado(s); setPaso(2); }} className="w-full p-5 border-2 border-slate-50 rounded-2xl flex justify-between font-bold hover:border-pink-500 transition-all">
+                      <span>{s.nombre}</span>
+                      <span className="text-pink-600">${s.precio}</span>
                     </button>
                   ))}
                 </div>
-              </div>
-            ) : reserva.fecha && (
-              <p className="text-center text-gray-500">No hay horarios disponibles</p>
-            )}
-          </div>
-        </div>
-      )}
+              )}
 
-      {paso === 3 && (
-        <div className="bg-white p-8 rounded-xl shadow-lg">
-          <h2 className="text-2xl font-bold mb-6">Tus datos</h2>
-          <div className="space-y-4">
-            <input
-              type="text"
-              placeholder="Nombre completo"
-              value={reserva.cliente.nombre}
-              onChange={(e) => setReserva({
-                ...reserva,
-                cliente: { ...reserva.cliente, nombre: e.target.value }
-              })}
-              className="w-full p-3 border rounded-lg"
-            />
-            <input
-              type="tel"
-              placeholder="Teléfono"
-              value={reserva.cliente.telefono}
-              onChange={(e) => setReserva({
-                ...reserva,
-                cliente: { ...reserva.cliente, telefono: e.target.value }
-              })}
-              className="w-full p-3 border rounded-lg"
-            />
-            <input
-              type="email"
-              placeholder="Email (opcional)"
-              value={reserva.cliente.email}
-              onChange={(e) => setReserva({
-                ...reserva,
-                cliente: { ...reserva.cliente, email: e.target.value }
-              })}
-              className="w-full p-3 border rounded-lg"
-            />
-            <button
-              onClick={() => setPaso(4)}
-              disabled={!reserva.cliente.nombre || !reserva.cliente.telefono}
-              className="w-full py-3 bg-pink-500 text-white rounded-lg font-bold hover:bg-pink-600 disabled:bg-gray-300 transition"
-            >
-              Continuar
-            </button>
-          </div>
-        </div>
-      )}
+              {paso === 2 && (
+                <div className="space-y-4">
+                  <select onChange={(e) => setFechaSeleccionada(e.target.value)} className="w-full p-4 bg-slate-50 rounded-xl font-bold">
+                    <option value="">Selecciona fecha</option>
+                    {fechasDisponibles.map(f => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                  <div className="grid grid-cols-3 gap-2">
+                    {fechaSeleccionada && horariosBase.map(h => (
+                      <button key={h} onClick={() => { setHoraSeleccionada(h); setPaso(3); }} className="p-3 bg-pink-50 text-pink-600 rounded-xl font-bold hover:bg-pink-600 hover:text-white">{h}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-      {paso === 4 && servicioSeleccionado && (
-        <div className="bg-white p-8 rounded-xl shadow-lg">
-          <h2 className="text-2xl font-bold mb-6">Confirmá tu reserva</h2>
-          <div className="space-y-4 mb-6">
-            <div className="flex justify-between py-3 border-b">
-              <span className="text-gray-600">Servicio:</span>
-              <span className="font-bold">{servicioSeleccionado.nombre}</span>
-            </div>
-            <div className="flex justify-between py-3 border-b">
-              <span className="text-gray-600">Fecha:</span>
-              <span className="font-bold">{new Date(reserva.fecha).toLocaleDateString('es-AR')}</span>
-            </div>
-            <div className="flex justify-between py-3 border-b">
-              <span className="text-gray-600">Hora:</span>
-              <span className="font-bold">{reserva.hora}</span>
-            </div>
-            <div className="flex justify-between py-3 border-b">
-              <span className="text-gray-600">Total:</span>
-              <span className="text-2xl font-bold text-pink-600">
-                ${servicioSeleccionado.precio.toLocaleString()}
-              </span>
+              {paso === 3 && (
+                <form onSubmit={manejarReserva} className="space-y-4">
+                  <input required placeholder="Tu Nombre" className="w-full p-4 bg-slate-50 rounded-xl" onChange={e => setDatosCliente({...datosCliente, nombre: e.target.value})} />
+                  <input required type="tel" placeholder="WhatsApp" className="w-full p-4 bg-slate-50 rounded-xl" onChange={e => setDatosCliente({...datosCliente, telefono: e.target.value})} />
+                  <button type="submit" className="w-full bg-slate-900 text-white p-5 rounded-2xl font-black uppercase tracking-widest">Confirmar Reserva</button>
+                </form>
+              )}
+
+              {paso === 4 && (
+                <div className="text-center py-6">
+                  <CheckCircle className="mx-auto text-green-500 mb-2" size={48} />
+                  <h2 className="text-2xl font-black">¡LISTO!</h2>
+                  <p className="text-slate-500">Te esperamos el {fechaSeleccionada}.</p>
+                </div>
+              )}
             </div>
           </div>
-          <button
-            onClick={confirmarReserva}
-            disabled={loading}
-            className="w-full py-4 bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-lg font-bold text-lg hover:shadow-lg transition disabled:opacity-50"
-          >
-            {loading ? 'Procesando...' : '💳 Pagar con Mercado Pago'}
-          </button>
-        </div>
-      )}
-
-      {paso > 1 && (
-        <button
-          onClick={() => setPaso(paso - 1)}
-          className="mt-6 px-6 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg transition"
-        >
-          ← Volver
-        </button>
-      )}
-    </div>
-  );
-}
-
-function VistaAdmin({ servicios, onActualizar }) {
-  const [token, setToken] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-
-  const login = async () => {
-    try {
-      const res = await fetch(`${API_URL}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-      const data = await res.json();
-      if (data.token) {
-        setToken(data.token);
-      } else {
-        alert('Credenciales inválidas');
-      }
-    } catch (error) {
-      alert('Error en login');
-    }
-  };
-
-  if (!token) {
-    return (
-      <div className="max-w-md mx-auto">
-        <div className="bg-white p-8 rounded-xl shadow-lg">
-          <h2 className="text-2xl font-bold mb-6 text-center">🔐 Login Admin</h2>
-          <div className="space-y-4">
-            <input
-              type="email"
-              placeholder="Email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full p-3 border rounded-lg"
-            />
-            <input
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && login()}
-              className="w-full p-3 border rounded-lg"
-            />
-            <button
-              onClick={login}
-              className="w-full py-3 bg-purple-600 text-white rounded-lg font-bold hover:bg-purple-700 transition"
-            >
-              Ingresar
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold">Panel de Administración</h2>
-        <button
-          onClick={() => setToken('')}
-          className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition flex items-center gap-2"
-        >
-          <LogOut size={18} />
-          Salir
-        </button>
-      </div>
-      <div className="bg-white p-6 rounded-xl shadow-lg">
-        <h3 className="text-xl font-bold mb-4">Panel Administrativo</h3>
-        <div className="space-y-4">
-          <div className="p-4 bg-pink-50 rounded-lg">
-            <p className="font-semibold text-pink-700 mb-2">Servicios Activos</p>
-            <p className="text-3xl font-bold text-pink-600">{servicios.length}</p>
-          </div>
-          <div className="space-y-2 text-gray-600">
-            <p className="font-semibold">Funcionalidades disponibles:</p>
-            <ul className="list-disc list-inside space-y-1 ml-4">
-              <li>Gestión de turnos diarios</li>
-              <li>CRUD de servicios</li>
-              <li>Visualización de pagos</li>
-              <li>Reportes y estadísticas</li>
-            </ul>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
-}
+};
+
+export default App;

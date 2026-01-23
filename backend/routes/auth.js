@@ -1,12 +1,12 @@
-// backend/routes/auth.js
+// backend/routes/auth.js - Version MySQL
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { body, validationResult } from 'express-validator';
-import Admin from '../models/Admin.js';
+import pool from '../config/db.js';
 
 const router = express.Router();
 
-// Middleware de validación
 const validarLogin = [
   body('email').isEmail().withMessage('Email inválido'),
   body('password').notEmpty().withMessage('Password requerido')
@@ -22,21 +22,24 @@ router.post('/login', validarLogin, async (req, res) => {
 
     const { email, password } = req.body;
 
-    // Buscar admin
-    const admin = await Admin.findOne({ email });
-    if (!admin) {
+    const [admins] = await pool.execute(
+      'SELECT * FROM admins WHERE email = ?',
+      [email]
+    );
+
+    if (admins.length === 0) {
       return res.status(401).json({ mensaje: 'Credenciales inválidas' });
     }
 
-    // Verificar password
-    const passwordValido = await admin.compararPassword(password);
+    const admin = admins[0];
+
+    const passwordValido = await bcrypt.compare(password, admin.password);
     if (!passwordValido) {
       return res.status(401).json({ mensaje: 'Credenciales inválidas' });
     }
 
-    // Generar JWT
     const token = jwt.sign(
-      { id: admin._id, email: admin.email },
+      { id: admin.id, email: admin.email },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -44,7 +47,7 @@ router.post('/login', validarLogin, async (req, res) => {
     res.json({
       token,
       admin: {
-        id: admin._id,
+        id: admin.id,
         nombre: admin.nombre,
         email: admin.email
       }
@@ -56,19 +59,27 @@ router.post('/login', validarLogin, async (req, res) => {
   }
 });
 
-// POST /api/auth/registro (solo para crear primer admin)
+// POST /api/auth/registro
 router.post('/registro', async (req, res) => {
   try {
     const { nombre, email, password } = req.body;
 
-    // Verificar si ya existe un admin
-    const adminExistente = await Admin.findOne({ email });
-    if (adminExistente) {
+    const [adminExistente] = await pool.execute(
+      'SELECT id FROM admins WHERE email = ?',
+      [email]
+    );
+
+    if (adminExistente.length > 0) {
       return res.status(400).json({ mensaje: 'Email ya registrado' });
     }
 
-    const nuevoAdmin = new Admin({ nombre, email, password });
-    await nuevoAdmin.save();
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    await pool.execute(
+      'INSERT INTO admins (nombre, email, password) VALUES (?, ?, ?)',
+      [nombre, email, passwordHash]
+    );
 
     res.status(201).json({ mensaje: 'Admin creado exitosamente' });
 
